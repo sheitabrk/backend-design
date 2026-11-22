@@ -4,7 +4,7 @@ Pre-write check for backend component files.
 
 Detects the kind of component (endpoint, worker/consumer, cron, integration)
 from path and content cues, then warns about missing senior reflexes for that
-component type. Does NOT block.
+component type. Does NOT block. Warnings go to Claude as hook additionalContext.
 
 Reflexes checked, by component type:
 
@@ -31,6 +31,9 @@ import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _hook_io import emit_warning, read_write_or_edit, text_field  # noqa: E402
 
 
 def is_skippable(path: str) -> bool:
@@ -141,24 +144,19 @@ def check_integration(content: str):
 
 def extract_content(tool_name: str, tool_input: dict) -> str:
     if tool_name == "Write":
-        return tool_input.get("content", "") or ""
+        return text_field(tool_input, "content")
     if tool_name == "Edit":
-        return (tool_input.get("new_string", "") or "")
+        return text_field(tool_input, "new_string")
     return ""
 
 
 def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+    event = read_write_or_edit()
+    if event is None:
         return 0
+    tool_name, tool_input = event
+    path = text_field(tool_input, "file_path")
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {}) or {}
-    path = tool_input.get("file_path", "") or ""
-
-    if tool_name not in ("Write", "Edit"):
-        return 0
     if not path:
         return 0
     if is_skippable(path):
@@ -190,12 +188,11 @@ def main() -> int:
         return 0
 
     kinds_str = ", ".join(sorted(kinds))
-    print("", file=sys.stderr)
-    print("[backend-design] component review for {} (detected: {})".format(path, kinds_str), file=sys.stderr)
+    lines = ["[backend-design] component review for {} (detected: {})".format(path, kinds_str)]
     for c in CONCERNS:
-        print("  - {}".format(c), file=sys.stderr)
-    print("  See skills/think-before-coding for the full 6-step workflow, or run `/backend-design:audit` once written.", file=sys.stderr)
-    print("", file=sys.stderr)
+        lines.append("  - {}".format(c))
+    lines.append("  See skills/think-before-coding for the full 6-step workflow, or run `/backend-design:audit` once written.")
+    emit_warning(lines)
     return 0
 
 

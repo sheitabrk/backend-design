@@ -12,13 +12,16 @@ Catches the obvious anti-patterns from the security-discipline skill:
 - Bearer tokens in URLs
 - CORS with `*` and credentials
 
-Warns to stderr, exits 0 (allow). The point is to flag, not gate.
+Warns via hook additionalContext on stdout, exits 0 (allow). The point is to flag,\nnot gate. Matched secrets are reported by line number only, never echoed.
 """
 
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _hook_io import emit_warning, read_write_or_edit, text_field  # noqa: E402
 
 
 SOURCE_EXTENSIONS = (
@@ -141,27 +144,25 @@ ALL_RULES = (
     + [("open-redirect", p, m) for p, m in REDIRECT_PATTERNS]
 )
 
+# Categories whose match text can contain a credential. Report location only.
+REDACTED_CATEGORIES = {"secret-shape", "token-in-url", "log-leak"}
+
 
 def extract_content(tool_name: str, tool_input: dict) -> str:
     if tool_name == "Write":
-        return tool_input.get("content", "") or ""
+        return text_field(tool_input, "content")
     if tool_name == "Edit":
-        return tool_input.get("new_string", "") or ""
+        return text_field(tool_input, "new_string")
     return ""
 
 
 def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+    event = read_write_or_edit()
+    if event is None:
         return 0
+    tool_name, tool_input = event
+    path = text_field(tool_input, "file_path")
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {}) or {}
-    path = tool_input.get("file_path", "") or ""
-
-    if tool_name not in ("Write", "Edit"):
-        return 0
     if not path:
         return 0
     if is_skippable(path):
@@ -182,21 +183,26 @@ def main() -> int:
             if key in seen:
                 continue
             seen.add(key)
-            findings.append((category, snippet, message))
+            line_no = content.count("\n", 0, m.start()) + 1
+            findings.append((category, snippet, message, line_no))
 
     if not findings:
         return 0
 
-    print("", file=sys.stderr)
-    print("[backend-design] security review for {}".format(path), file=sys.stderr)
-    for category, snippet, message in findings:
+    where = "line" if tool_name == "Write" else "line of the new text"
+    lines = ["[backend-design] security review for {}".format(path)]
+    for category, snippet, message, line_no in findings:
+        lines.append("  - [{}] {}".format(category, message))
+        if category in REDACTED_CATEGORIES:
+            # Never echo a matched secret: it would land in the transcript.
+            lines.append("    at {} {} (match not shown)".format(where, line_no))
+            continue
         first_line = snippet.split("\n", 1)[0]
         if len(first_line) > 90:
             first_line = first_line[:87] + "..."
-        print("  - [{}] {}".format(category, message), file=sys.stderr)
-        print("    match: {}".format(first_line), file=sys.stderr)
-    print("  See: skills/security-discipline. For a full pass, ask the security-reviewer agent.", file=sys.stderr)
-    print("", file=sys.stderr)
+        lines.append("    at {} {}: {}".format(where, line_no, first_line))
+    lines.append("  See: skills/security-discipline. For a full pass, ask the security-reviewer agent.")
+    emit_warning(lines)
     return 0
 
 
