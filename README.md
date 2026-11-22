@@ -8,12 +8,14 @@ If you use Claude Code's plugin marketplace, install via the UI. To install manu
 
 ### Hook requirements
 
-The three Python hooks (`check_migration.py`, `check_backend_component.py`, `check_security.py`) need Python 3.8+ available as `python` on PATH. They warn-only, never block, and exit cleanly if something is off.
+The three Python hooks (`check_migration.py`, `check_backend_component.py`, `check_security.py`) need Python 3.8+. `hooks/hooks.json` runs them with `python3` and falls back to `python`, so either name on PATH works. They warn-only, never block, and exit cleanly if something is off.
+
+Warnings reach Claude as the hook's `additionalContext` (JSON on stdout). Claude Code does not show Claude the stderr of a hook that exits 0, so stderr is not used. `check_security.py` reports a matched secret by line number only and never repeats it.
 
 Platform notes:
-- **Windows**: `python` is normally on PATH after the standard installer. `py` works too but `hooks.json` uses `python`. Tested working.
-- **Linux**: most distros ship `python` as a symlink to `python3`. Works out of the box on Debian/Ubuntu (when `python-is-python3` is installed), Fedora, Arch. On a fresh distro that only ships `python3`, either install the alias package or edit `hooks/hooks.json` to call `python3`.
-- **macOS**: Apple removed `python` (2.x) in macOS 12.3. Modern setups install Python 3 via `brew install python` (which provides `python3`), pyenv, or asdf. If `python` is not on PATH, either symlink it (`brew install python && ln -s $(which python3) /usr/local/bin/python`) or edit `hooks/hooks.json` to call `python3`.
+- **macOS**: Apple removed `python` in macOS 12.3; `python3` works once the Xcode Command Line Tools or a Homebrew/pyenv Python is installed. Don't create a `python` link to `/usr/bin/python3`: that file is an Xcode launcher that picks the tool by the name it was called with, so called as `python` it fails with exit 72.
+- **Linux**: `python3` is standard. Nothing to do.
+- **Windows**: the standard installer provides `python`; the `python3` attempt fails and the fallback runs. This change was not retested on Windows.
 
 If the hooks cannot run, nothing else in the plugin breaks: skills, agents, and commands work without them. You only lose the inline warnings at write time.
 

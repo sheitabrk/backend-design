@@ -11,13 +11,16 @@ Triggers on file paths that look like migrations:
 - contains "/alembic/" or "\\alembic\\"
 - filename matches a typical migration prefix (V123__, 20240101_, 0001_, etc.)
 
-Emits warnings to stderr, exits 0 (allow).
+Emits warnings as hook additionalContext on stdout, exits 0 (allow).
 """
 
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _hook_io import emit_warning, read_write_or_edit, text_field  # noqa: E402
 
 
 MIGRATION_PATH_PATTERNS = [
@@ -88,24 +91,19 @@ def is_migration_path(path: str) -> bool:
 
 def extract_content(tool_name: str, tool_input: dict) -> str:
     if tool_name == "Write":
-        return tool_input.get("content", "") or ""
+        return text_field(tool_input, "content")
     if tool_name == "Edit":
-        return (tool_input.get("new_string", "") or "") + "\n" + (tool_input.get("old_string", "") or "")
+        return text_field(tool_input, "new_string") + "\n" + text_field(tool_input, "old_string")
     return ""
 
 
 def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+    event = read_write_or_edit()
+    if event is None:
         return 0
+    tool_name, tool_input = event
+    path = text_field(tool_input, "file_path")
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {}) or {}
-    path = tool_input.get("file_path", "") or ""
-
-    if tool_name not in ("Write", "Edit"):
-        return 0
     if not is_migration_path(path):
         return 0
 
@@ -121,13 +119,12 @@ def main() -> int:
     if not findings:
         return 0
 
-    print("", file=sys.stderr)
-    print("[backend-design] migration-safety review for {}".format(path), file=sys.stderr)
+    lines = ["[backend-design] migration-safety review for {}".format(path)]
     for f in findings:
-        print("  - {}".format(f["name"]), file=sys.stderr)
-        print("    {}".format(f["why"]), file=sys.stderr)
-    print("  See: skills/migration-safety. Run `/backend-design:review-migration` for a full review.", file=sys.stderr)
-    print("", file=sys.stderr)
+        lines.append("  - {}".format(f["name"]))
+        lines.append("    {}".format(f["why"]))
+    lines.append("  See: skills/migration-safety. Run `/backend-design:review-migration` for a full review.")
+    emit_warning(lines)
     return 0
 
 
