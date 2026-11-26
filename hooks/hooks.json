@@ -6,17 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/check_migration.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_migration.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/check_migration.py\"",
             "async": false
           },
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/check_backend_component.py\"",
-            "async": false
-          },
-          {
-            "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/check_security.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_security.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/check_security.py\"",
             "async": false
           }
         ]

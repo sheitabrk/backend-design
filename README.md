@@ -8,14 +8,13 @@ If you use Claude Code's plugin marketplace, install via the UI. To install manu
 
 ### Hook requirements
 
-The three Python hooks (`check_migration.py`, `check_backend_component.py`, `check_security.py`) need Python 3.8+ available as `python` on PATH. They warn-only, never block, and exit cleanly if something is off.
+The two Python hooks (`check_migration.py`, `check_security.py`) need Python 3.8+ available as `python3` or `python` on PATH. They warn Claude and never block.
 
-Platform notes:
-- **Windows**: `python` is normally on PATH after the standard installer. `py` works too but `hooks.json` uses `python`. Tested working.
-- **Linux**: most distros ship `python` as a symlink to `python3`. Works out of the box on Debian/Ubuntu (when `python-is-python3` is installed), Fedora, Arch. On a fresh distro that only ships `python3`, either install the alias package or edit `hooks/hooks.json` to call `python3`.
-- **macOS**: Apple removed `python` (2.x) in macOS 12.3. Modern setups install Python 3 via `brew install python` (which provides `python3`), pyenv, or asdf. If `python` is not on PATH, either symlink it (`brew install python && ln -s $(which python3) /usr/local/bin/python`) or edit `hooks/hooks.json` to call `python3`.
+`hooks.json` tries `python3` first and falls back to `python`, which covers Windows and distros that ship only one of the two names.
 
-If the hooks cannot run, nothing else in the plugin breaks: skills, agents, and commands work without them. You only lose the inline warnings at write time.
+If the hooks cannot run, skills, agents, and commands still work. You only lose the warnings at write time.
+
+Run the hook tests with `python3 -m unittest discover -s tests`.
 
 ## Contributing
 
@@ -42,7 +41,7 @@ Backend Design adds those reflexes. It is opinionated, short, and applies to **e
 
 ## How It Works
 
-The plugin installs thirteen skills, six agents, five commands, and three hooks. Together they make Claude:
+The plugin installs thirteen skills, six agents, five commands, and two hooks. Together they make Claude:
 
 1. Pause before writing code and run a 6-step workflow that includes load, security, and authorization.
 2. Push schema invariants into the database, not the application.
@@ -94,9 +93,10 @@ The plugin installs thirteen skills, six agents, five commands, and three hooks.
 
 ### Hooks
 
-- **`check_migration.py`**. Pre-write hook on migration files. Warns when a write would introduce a dangerous pattern.
-- **`check_backend_component.py`**. Pre-write hook on backend component files. Detects the component type (endpoint / worker / cron / integration) and warns when senior reflexes are missing: silent except, no validation, no idempotency, HTTP call without timeout, and so on.
-- **`check_security.py`**. Pre-write hook for security horrors. Flags string-concat SQL, hard-coded secrets, sensitive fields in logs, disabled TLS verification, `shell=True` with input, weak crypto, tokens in URLs, CORS wildcard with credentials.
+- **`check_migration.py`**. Runs on writes to migration files. Warns when a write introduces a dangerous SQL pattern. For an edit, only what the edit adds is reported. It reads SQL, including SQL inside code; it does not understand ORM migration APIs such as `op.drop_column` or `remove_column`.
+- **`check_security.py`**. Runs on writes to source and config files. Flags string-built SQL, hard-coded secrets, sensitive fields in logs, disabled TLS verification, shell execution, weak crypto, tokens in URLs, CORS wildcard. Matched text is never repeated. Real `.env` files are not scanned.
+
+Both are regex heuristics: a quiet result does not mean the change is safe.
 
 All hooks warn, none of them block.
 
