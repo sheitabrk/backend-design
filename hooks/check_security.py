@@ -12,13 +12,16 @@ Catches the obvious anti-patterns from the security-discipline skill:
 - Bearer tokens in URLs
 - CORS with `*` and credentials
 
-Warns to stderr, exits 0 (allow). The point is to flag, not gate.
+Warns Claude and exits 0 (allow). The point is to flag, not gate.
+Matched text is never repeated, so a warning cannot copy a secret around.
+
+This is a regex heuristic. A quiet result is not a security review.
 """
 
-import json
-import os
 import re
 import sys
+
+from _hook_io import read_payload, relative_path, text, warn
 
 
 SOURCE_EXTENSIONS = (
@@ -26,16 +29,25 @@ SOURCE_EXTENSIONS = (
     ".go", ".rb", ".rs", ".java", ".kt", ".cs", ".php", ".sql",
 )
 
-SKIP_MARKERS = (
-    "/test", "/tests/", "_test.", ".test.", ".spec.",
-    "/node_modules/", "/.git/", "/dist/", "/build/",
-    "/__pycache__/", "/vendor/", "/fixtures/", "/mocks/",
+# Config files get the secret rules only. Real .env files are deliberately not
+# listed: that is where secrets belong. Their committed templates are.
+CONFIG_SUFFIXES = (
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".properties",
+    ".tf", ".sh", ".xml", ".env.example", ".env.sample", ".env.template",
 )
+
+SKIP_DIRS = {
+    "test", "tests", "__tests__", "node_modules", ".git", "dist", "build",
+    "__pycache__", "vendor", "fixtures", "mocks", "__mocks__",
+}
+
+SKIP_FILENAME = re.compile(r"^test_.*\.py$|^conftest\.py$|_test\.[a-z]+$|_spec\.rb$|\.(test|spec)\.[a-z]+$")
 
 
 def is_skippable(path: str) -> bool:
-    p = path.lower().replace("\\", "/")
-    return any(m in p for m in SKIP_MARKERS)
+    """Expects a lower-cased, forward-slash path."""
+    *dirs, name = path.split("/")
+    return bool(SKIP_DIRS.intersection(dirs) or SKIP_FILENAME.search(name))
 
 
 SECRET_SHAPES = [
@@ -47,16 +59,22 @@ SECRET_SHAPES = [
     (re.compile(r"ghp_[0-9a-zA-Z]{30,}"), "GitHub personal access token"),
     (re.compile(r"github_pat_[0-9a-zA-Z_]{30,}"), "GitHub fine-grained PAT"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "PEM private key block"),
-    # Connection strings with embedded credentials
-    (re.compile(r"(?i)(postgres|mysql|mongodb|redis)://[^/\s'\"]+:[^@\s'\"]+@"), "DB URL with embedded credentials"),
+    (re.compile(r"\bsk-(?:ant|proj)-[0-9a-zA-Z_\-]{20,}"), "Anthropic or OpenAI API key"),
+    (re.compile(r"\bsb_secret_[0-9a-zA-Z_\-]{20,}"), "Supabase secret key"),
+    # Connection strings with embedded credentials; ${VAR}, <x> and [x] are placeholders
+    (re.compile(r"""(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?)(?:\+\w+)?://[^/\s'"@:]*:(?![$<{\[])[^@\s'"/]+@"""), "DB URL with embedded credentials"),
     # Generic assignment to a name that smells like a secret with a long literal
-    (re.compile(r"""(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["'][A-Za-z0-9_\-/+=]{20,}["']"""), "Hard-coded secret literal"),
+    (re.compile(r"""(?i)(?<![a-z])(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)["']?\s*[:=]\s*["'][A-Za-z0-9_\-/+=]{20,}["']"""), "Hard-coded secret literal"),
 ]
 
 
 SQL_INJECTION_PATTERNS = [
     (
-        re.compile(r"""(?i)(?:\.execute|\.query|cursor\.execute|db\.exec)\s*\(\s*f["']\s*(SELECT|INSERT|UPDATE|DELETE|MERGE)\b"""),
+        re.compile(r"""(?i)(?:\.execute\w*|\.query|\.raw|\.\$(?:query|execute)RawUnsafe|db\.exec)\s*(?:<[^<>()`]*>)?\s*\(\s*`\s*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH)\b[^`]*\$\{"""),
+        "SQL built with a template literal. Use a parameterized placeholder, not interpolation.",
+    ),
+    (
+        re.compile(r'''(?i)(?:\.execute\w*|\.query|db\.exec)\s*\(\s*(?:rf|fr|f)(?:"""|\'\'\'|"|\')\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|WITH)\b'''),
         "SQL built with an f-string in execute/query. Use a parameterized placeholder, not interpolation.",
     ),
     (
@@ -93,8 +111,9 @@ TLS_DISABLED_PATTERNS = [
 COMMAND_INJECTION_PATTERNS = [
     (re.compile(r"\bsubprocess\.\w+\([^)\n]*shell\s*=\s*True\b"), "`subprocess` with shell=True. Pass args as a list and drop shell=True, especially with any user input."),
     (re.compile(r"\bos\.system\s*\("), "os.system invokes a shell. Use subprocess with an args list instead."),
-    (re.compile(r"(?<!\w)eval\s*\("), "eval on a dynamic string is arbitrary code execution. Replace with explicit parsing."),
-    (re.compile(r"(?<!\w)exec\s*\("), "exec on a dynamic string is arbitrary code execution. Replace with explicit parsing."),
+    (re.compile(r"(?<![\w.$])eval\s*\("), "eval on a dynamic string is arbitrary code execution. Replace with explicit parsing."),
+    (re.compile(r"(?<![\w.$])exec(?:Sync)?\s*\("), "exec on a dynamic string is arbitrary code execution. Replace with explicit parsing."),
+    (re.compile(r"""\bchild_process(?:['"]\s*\))?\.exec(?:Sync)?\s*\("""), "child_process.exec runs a shell. Use execFile or spawn with an args list."),
     (re.compile(r"\bRuntime\.getRuntime\(\)\.exec\s*\("), "Runtime.exec with concatenated input is a command injection vector."),
 ]
 
@@ -142,61 +161,41 @@ ALL_RULES = (
 )
 
 
-def extract_content(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "Write":
-        return tool_input.get("content", "") or ""
-    if tool_name == "Edit":
-        return tool_input.get("new_string", "") or ""
-    return ""
-
-
 def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+    payload = read_payload()
+    if payload is None:
+        return 0
+    tool_name, tool_input, cwd = payload
+    path = tool_input["file_path"]
+    relative = relative_path(path, cwd)
+
+    if is_skippable(relative):
+        return 0
+    if relative.endswith(SOURCE_EXTENSIONS):
+        rules = ALL_RULES
+    elif relative.endswith(CONFIG_SUFFIXES):
+        rules = [rule for rule in ALL_RULES if rule[0] == "secret-shape"]
+    else:
         return 0
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {}) or {}
-    path = tool_input.get("file_path", "") or ""
+    content = text(tool_input, "content" if tool_name == "Write" else "new_string")
 
-    if tool_name not in ("Write", "Edit"):
-        return 0
-    if not path:
-        return 0
-    if is_skippable(path):
-        return 0
-    if not path.lower().endswith(SOURCE_EXTENSIONS):
-        return 0
-
-    content = extract_content(tool_name, tool_input)
-    if not content.strip():
-        return 0
-
-    findings = []
-    seen = set()
-    for category, pattern, message in ALL_RULES:
+    # (category, message) -> line numbers. The matched text is never kept.
+    findings = {}
+    for category, pattern, message in rules:
         for m in pattern.finditer(content):
-            snippet = m.group(0)
-            key = (category, snippet[:80])
-            if key in seen:
-                continue
-            seen.add(key)
-            findings.append((category, snippet, message))
+            findings.setdefault((category, message), set()).add(content.count("\n", 0, m.start()) + 1)
 
     if not findings:
         return 0
 
-    print("", file=sys.stderr)
-    print("[backend-design] security review for {}".format(path), file=sys.stderr)
-    for category, snippet, message in findings:
-        first_line = snippet.split("\n", 1)[0]
-        if len(first_line) > 90:
-            first_line = first_line[:87] + "..."
-        print("  - [{}] {}".format(category, message), file=sys.stderr)
-        print("    match: {}".format(first_line), file=sys.stderr)
-    print("  See: skills/security-discipline. For a full pass, ask the security-reviewer agent.", file=sys.stderr)
-    print("", file=sys.stderr)
+    where = "line" if tool_name == "Write" else "new text line"
+    lines = ["[backend-design] security review for {}".format(path)]
+    for (category, message), numbers in findings.items():
+        at = ", ".join(str(n) for n in sorted(numbers)[:5])
+        lines.append("- [{}] {} ({} {})".format(category, message, where, at))
+    lines.append("See the security-discipline skill. For a full pass, ask the security-reviewer agent.")
+    warn(lines)
     return 0
 
 

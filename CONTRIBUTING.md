@@ -40,20 +40,22 @@ The plugin's existing skills are the style guide. Match them.
 
 The plugin includes its own test fixtures via the hooks.
 
-Hook smoke tests (Python 3.8+ required):
+Hook tests (Python 3.8+ required):
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Hook smoke tests:
 
 ```bash
 # Migration hook
-echo '{"tool_name":"Write","tool_input":{"file_path":"db/migrations/x.sql","content":"<sql>"}}' \
-  | python hooks/check_migration.py
-
-# Backend component hook
-echo '{"tool_name":"Write","tool_input":{"file_path":"src/handlers/x.ts","content":"<code>"}}' \
-  | python hooks/check_backend_component.py
+echo '{"tool_name":"Write","tool_input":{"file_path":"/p/db/migrations/x.sql","content":"<sql>"}}' \
+  | python3 hooks/check_migration.py
 
 # Security hook
-echo '{"tool_name":"Write","tool_input":{"file_path":"src/x.py","content":"<code>"}}' \
-  | python hooks/check_security.py
+echo '{"tool_name":"Write","tool_input":{"file_path":"/p/src/x.py","content":"<code>"}}' \
+  | python3 hooks/check_security.py
 ```
 
 For any new hook rule, include in the PR:
